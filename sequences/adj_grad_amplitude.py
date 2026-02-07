@@ -55,7 +55,7 @@ class CalGradAmplitude(PulseqSequence, registry_key=Path(__file__).stem):
         configuration_data = reading_json_parameter()
 
         grad_axes = ["x", "y", "z"]
-        iter = 20
+        iter = 10
         for iterations in range(iter):
             for axis in grad_axes:
                 print("test")
