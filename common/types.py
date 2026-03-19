@@ -114,15 +114,15 @@ class AdjustmentShim(BaseModel):
 
 
 class AdjustmentRF(BaseModel):
-    larmor_frequency: float = 0.0
-    rf_max_amplitude: float = 0.0
-    rf_pi2_fraction: float = 0.0
+    larmor_frequency: float = 11.464 # MHz for 0.268T
+    rf_max_amplitude: float = 7661.29
+    rf_pi2_fraction: float = 0.6744
 
 
 class AdjustmentGradients(BaseModel):
-    gx_max: float = 0.0
-    gy_max: float = 0.0
-    gz_max: float = 0.0
+    gx_max: float = 270000
+    gy_max: float = 378000.0
+    gz_max: float = 10000000.0
 
 
 class AdjustmentSettings(BaseModel):
