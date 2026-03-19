@@ -1,5 +1,6 @@
 import math
 import numpy as np
+
 import pypulseq as pp  # type: ignore
 import external.seq.adjustments_acq.config as cfg
 
@@ -9,10 +10,9 @@ log = logger.get_logger()
 
 
 def pypulseq_1dse(
-    inputs=None, check_timing=True, output_file="", system=None, rf_duration=100e-6
-):
+    inputs=None, check_timing=True, output_file="", rf_duration=50e-6
+) -> bool:
     if not output_file:
-        log.info("No output file specified")
         log.error("No output file specified")
         return False
 
@@ -20,24 +20,32 @@ def pypulseq_1dse(
     # DEFAULTS FROM CONFIG FILE              TODO: MOVE DEFAULTS TO UI
     # ======
     #   ======
-    # LARMOR_FREQ = cfg.LARMOR_FREQ
-    # RF_MAX = cfg.RF_MAX
-    # RF_PI2_FRACTION = cfg.RF_PI2_FRACTION
-    alpha1 = 90  # flip angle
+    rf_duration = 100e-6
+    LARMOR_FREQ = cfg.LARMOR_FREQ
+    RF_MAX = cfg.RF_MAX
+    RF_PI2_FRACTION = cfg.RF_PI2_FRACTION
+    alpha1 = cfg.DBG_FA_EXC  # flip angle
     alpha1_duration = rf_duration  # pulse duration
-    alpha2 = 180  # refocusing flip angle
+    alpha2 = cfg.DBG_FA_REF  # refocusing flip angle
     alpha2_duration = rf_duration  # pulse duration
- 
+    # TE = 20e-3
+    # TR = 3000e-3
+    # num_averages = 1
+    # channel = "y"
     TR = inputs["TR"] / 1000  # ms to s
     TE = inputs["TE"] / 1000
     num_averages = inputs["NSA"]
-    fov = inputs["FOV"] / 1000 # mm to m
+    fov = inputs["FOV"] / 1000
     Nx = inputs["Base_Resolution"]
     BW = inputs["BW"]
     channel = inputs["Gradient"]
-    system = inputs["system"]
 
-    
+    # fov = 20e-3  # Define FOV and resolution - 37.5e-3
+    # Nx = 250
+    # BW = 64e3
+    # adc_dwell = 1 / BW
+    # adc_duration = 2.25e-3 # Nx * adc_dwell  # 6.4e-3
+    prephaser_duration = 5e-3  # TODO: Need to define this behind the scenes and optimze
     rise_time = 250e-6  # dG = 200e-6 # Grad rise time
 
     # ======
@@ -49,28 +57,19 @@ def pypulseq_1dse(
     # ======
     # SET SYSTEM CONFIG TODO --> ?
     # ======
-    # if channel == "x":
-    #     max_grad = cfg.GX_MAX
-    # elif channel == "y":
-    #     max_grad = cfg.GY_MAX
-    # elif channel == "z":
-    #     max_grad = cfg.GZ_MAX
 
-
-    # system = pp.Opts(
-    #     max_grad=max_grad,  
-    #     grad_unit="Hz/m", # 
-    #     max_slew=1000,
-    #     slew_unit="T/m/s",
-    #     #rf_ringdown_time=100e-6,
-    #     rf_ringdown_time=20e-6,
-    #     rf_dead_time=100e-6,
-    #     rf_raster_time=1e-6,
-    #     #adc_dead_time=10e-6,
-    #     adc_dead_time=20e-6,
-    #     grad_raster_time = adc_dwell,
-    # )
-
+    system = pp.Opts(
+        max_grad=200,
+        grad_unit="mT/m",
+        max_slew=4000,
+        slew_unit="T/m/s",
+        # rf_ringdown_time=100e-6,
+        rf_ringdown_time=20e-6,
+        rf_dead_time=100e-6,
+        rf_raster_time=1e-6,
+        # adc_dead_time=10e-6,
+        adc_dead_time=20e-6,
+    )
 
     # ======
     # CREATE EVENTS
@@ -90,13 +89,9 @@ def pypulseq_1dse(
         system=system,
         use="refocusing",
     )
-    
-    # readout_time = (Nx / BW) + (2 * system.adc_dead_time)
-    readout_time = (Nx / BW)
-    # readout_time = np.max([readout_time, 4e-3])  # limit readout time based on max gradient strength
-    prephaser_duration = 0.5 * readout_time
-    delta_k = 1 / fov   
-    log.info("**Gradient max amplitude**: ", system.max_grad)
+    # readout_time = 2.5e-3 + (2 * system.adc_dead_time)
+    readout_time = 8.0e-3 + (2 * system.adc_dead_time)
+    delta_k = 1 / fov
     gx = pp.make_trapezoid(
         channel=channel,
         flat_area=Nx * delta_k,
@@ -104,8 +99,6 @@ def pypulseq_1dse(
         rise_time=rise_time,
         system=system,
     )
-    log.info("**Gradient amplitude**: ", gx.amplitude)
-
     gx_pre = pp.make_trapezoid(
         channel=channel,
         area=gx.area / 2,
@@ -114,7 +107,7 @@ def pypulseq_1dse(
         system=system,
     )
     adc = pp.make_adc(
-        num_samples=2 * Nx, # oversampling by factor 2
+        num_samples=Nx,
         duration=gx.flat_time,
         delay=gx.rise_time,
         phase_offset=np.pi / 2,
@@ -135,8 +128,23 @@ def pypulseq_1dse(
         )
     ) * seq.grad_raster_time
 
+    # tau2 = (
+    #     math.ceil(
+    #         (
+    #             TE / 2
+    #             - 0.5 * (pp.calc_duration(rf2))
+    #             - pp.calc_duration(gx_pre)
+    #             - 2 * rise_time
+    #         )
+    #         / seq.grad_raster_time
+    #     )
+    # ) * seq.grad_raster_time  # TODO: gradient delays need to be calibrated
+
     tau2 = (
-        math.ceil((TE / 2 - 0.5 * (pp.calc_duration(rf2) + pp.calc_duration(gx))) / seq.grad_raster_time)
+        math.ceil(
+            (TE / 2 - 0.5 * (pp.calc_duration(rf2) + pp.calc_duration(gx)))
+            / seq.grad_raster_time
+        )
     ) * seq.grad_raster_time
 
     delay_TR = TR - TE - (0.5 * readout_time)
@@ -149,6 +157,9 @@ def pypulseq_1dse(
     # ======
     # Loop over phase encodes and define sequence blocks
 
+    # gx_pre.amplitude = 0
+    # gx.amplitude = 0
+
     for avg in range(num_averages):
         seq.add_block(rf1)
         seq.add_block(gx_pre)
@@ -158,8 +169,11 @@ def pypulseq_1dse(
         seq.add_block(gx, adc)  # Projection
         seq.add_block(pp.make_delay(delay_TR))
 
+    # seq.plot(time_range=[0, 2*TR])
+    # seq.write("se_1D_local.seq")
+
     # Check whether the timing of the sequence is correct
-    check_timing = False
+    check_timing = True
     if check_timing:
         ok, error_report = seq.check_timing()
         if ok:
@@ -167,7 +181,7 @@ def pypulseq_1dse(
         else:
             print("Timing check failed. Error listing follows:")
             [print(e) for e in error_report]
-    
+
     log.debug(output_file)
     try:
         seq.write(output_file)
@@ -175,5 +189,5 @@ def pypulseq_1dse(
     except:
         log.error("Could not write sequence file")
         return False
-    
+
     return True

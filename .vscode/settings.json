@@ -1,8 +1,6 @@
 {
-    "terminal.integrated.env.linux": {
-        "PYTHONPATH": "${workspaceFolder}"
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
     },
-    "githubPullRequests.ignoredPullRequestBranches": [
-        "main"
-    ]
+    "python.formatting.provider": "none"
 }
