@@ -25,9 +25,20 @@ import argparse
 
 import numpy as np
 
-# --- Locate marcos_client (sibling 'marcos/marcos_client' folder) -----------
+# --- Locate marcos_client (works in repo layout and dev layout) -------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-MARCOS_CLIENT = os.path.normpath(os.path.join(HERE, "..", "marcos", "marcos_client"))
+
+
+def _locate_marcos_client():
+    for c in (os.path.normpath(os.path.join(HERE, "..", "marcos", "marcos_client")),  # dev
+              os.path.join(HERE, "marcos_client"),                                     # repo (vendored)
+              os.path.join(HERE, "mri4all_console", "external", "marcos_client")):     # console-bundled
+        if os.path.exists(os.path.join(c, "experiment.py")):
+            return c
+    return os.path.normpath(os.path.join(HERE, "..", "marcos", "marcos_client"))
+
+
+MARCOS_CLIENT = _locate_marcos_client()
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,0 @@
-PySide6>=6.6
-pyqtgraph>=0.13
-numpy>=1.26
-msgpack>=1.0

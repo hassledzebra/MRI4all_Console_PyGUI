@@ -1,12 +1,62 @@
-# MRI4ALL Console
+# Red Pitaya MaRCoS Console (Python GUI)
 
-This repository contains the console software for the Zeugmatron Z1 MRI scanner that was developed during the MRI4ALL Hackathon 2023. The software has been built solely using open-source components. It runs under the Ubuntu 22.04 operating system and has been written in Python 3 using PyQt5 for the graphical user interface. A development environment with  automatic installation is provided. Installation instructions are provided in the [Wiki](https://github.com/mri4all/console/wiki).
+A native **macOS** Python GUI for operating a **Red Pitaya SDRlab 122-16** running
+[MaRCoS](https://github.com/vnegnev/marcos_extras) as a low-field MRI console —
+styled after the [MRI4all](https://github.com/mri4all/console) console, which
+targets Ubuntu only.
 
-![Screenshot from 2024-02-22 21-09-10](https://github.com/mri4all/console/assets/35747793/2da37f29-bd7a-491e-81ea-2f57ce5ae4b2)
+The GUI is the main project; the upstream MRI4all console is vendored under
+[`mri4all_console/`](mri4all_console/) and its **real pulse-sequence builders are
+reused** (not reimplemented) via [`seq_engine.py`](seq_engine.py).
 
+## Quick start
 
-## Software Overview and Platform Architecture
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-The <a href="https://www.youtube.com/embed/8GNmocJP-14" target="_blank">video below</a> provides an overview & demo of the MRI4ALL Console Software. It also gives a brief introduction to the underlying software architecture and explains how custom sequences and reconstruction techniques can be integrated.
+python rp_console.py            # launch the GUI
+python rp_console.py --selftest # headless logic checks
+python loopback_test.py --ip rp-f0d431.local --amp 0.2   # TX→RX PASS/FAIL test
+```
 
-[![Overview of the MRI4ALL Console Software](https://img.youtube.com/vi/8GNmocJP-14/0.jpg)](https://www.youtube.com/watch?v=8GNmocJP-14)
+See **[SETUP.md](SETUP.md)** for the board side — including the key trick for
+running MaRCoS on **Red Pitaya OS 2.x** (load the bitstream with `fpgautil`, no
+device-tree overlay; `marcos_server` talks to the FPGA via `/dev/mem`).
+
+## What the GUI does
+
+- **Built-in sequences** (self-contained): FID, Spin Echo, **TX→RX loopback test**.
+- **Console sequences**: the real `mri4all/console` pypulseq builders (`rf_se`,
+  `se_1D`) run through flocra-pulseq → marcos, reused without a rewrite.
+- Pulse-**sequence diagrams**, live **time-domain + FFT** plots, demo + real modes.
+- MRI4all dark/amber theme, Home → Examination flow.
+
+## Repository layout
+
+```
+.
+├── rp_console.py          # the GUI (PySide6 + pyqtgraph)
+├── seq_engine.py          # adapter that reuses the console's sequence builders
+├── loopback_test.py       # standalone TX→RX bring-up test
+├── requirements.txt
+├── SETUP.md               # board / MaRCoS setup (OS 2.x bitstream-only)
+├── assets/                # MRI4all branding
+├── marcos_client/         # vendored marcos client (built-in sequences)
+└── mri4all_console/       # vendored upstream mri4all/console (sequence builders)
+```
+
+`rp_console.py` and `seq_engine.py` auto-detect these folders, and also work in a
+side-by-side dev layout (`gui/` next to `marcos/console`).
+
+## Hardware status
+
+The console + TX/RX chain are verified (loopback PASS; console `rf_se` runs on the
+board). Real imaging additionally needs a tuned RF coil + sample, a B₀ magnet, and
+the GPA gradient board (which unlocks `se_2D`/`tse` + image reconstruction).
+
+## Credits
+
+Built on [MaRCoS](https://github.com/vnegnev) (Vlad Negnevitsky et al.) and the
+[MRI4all](https://mri4all.org) console (Tobias Block et al.). Upstream code under
+`mri4all_console/` retains its original license.

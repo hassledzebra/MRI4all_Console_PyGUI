@@ -19,8 +19,27 @@ import logging
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONSOLE = os.path.normpath(os.path.join(HERE, "..", "marcos", "console"))
-MARCOS_CLIENT = os.path.normpath(os.path.join(HERE, "..", "marcos", "marcos_client"))
+
+
+def _find(cands, marker):
+    """First candidate dir that contains `marker` (file or subdir); else cands[0]."""
+    for c in cands:
+        if os.path.exists(os.path.join(c, marker)):
+            return c
+    return cands[0]
+
+
+# Works in the repo layout (console vendored as a sibling subfolder) and in the
+# dev layout (console at ../marcos/console).
+CONSOLE = _find([
+    os.path.join(HERE, "mri4all_console"),                              # repo layout
+    os.path.normpath(os.path.join(HERE, "..", "marcos", "console")),    # dev layout
+], os.path.join("sequences", "common"))
+MARCOS_CLIENT = _find([
+    os.path.normpath(os.path.join(HERE, "..", "marcos", "marcos_client")),  # dev
+    os.path.join(HERE, "marcos_client"),                                    # repo (vendored)
+    os.path.join(CONSOLE, "external", "marcos_client"),                     # console-bundled
+], "experiment.py")
 ENGINE_DIR = os.path.join(HERE, "engine")
 
 _booted = False
