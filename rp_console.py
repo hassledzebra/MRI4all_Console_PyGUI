@@ -296,6 +296,39 @@ def run_image(params, demo=False):
             "msgs": msgs, "image": img, "kspace": k, "flodict": None}
 
 
+def run_wobble(params, demo=False):
+    """Coil tune & match ("wobble"): sweep the TX frequency and measure the
+    reflected amplitude (needs a directional coupler / reflection bridge between
+    TX and the coil → RX). The return-loss **dip** marks the coil resonance —
+    adjust the tuning cap to move the dip onto the Larmor frequency and the
+    matching cap to deepen it. Returns return-loss (dB) vs frequency.
+    """
+    c = params["freq_mhz"]
+    span = float(params.get("wobble_span_khz", 500.0)) / 1e3
+    n = int(params.get("wobble_n", 41))
+    xs = np.linspace(c - span / 2, c + span / 2, n)
+    refl = np.zeros(n)
+    last = None
+    for i, x in enumerate(xs):
+        if demo:                              # synthetic Lorentzian reflection notch
+            dip = 1.0 - 0.92 / (1.0 + ((x - c) / (span / 14)) ** 2)
+            iq = (dip * 0.3) * np.exp(1j * 0.2) * np.ones(params["n_samples"]) \
+                + synth_fid(params["n_samples"], params["rx_dwell_us"], amp=0.0, seed=i)
+            last = {"iq": iq, "t_ms": np.arange(len(iq)) * params["rx_dwell_us"] * 1e-3}
+        else:                                 # TX overlaps RX → reflected via coupler
+            last = run_experiment(dict(params, sequence="loopback",
+                                       freq_mhz=float(x), nsa=1), demo=False)
+        refl[i] = float(np.abs(last["iq"]).mean())
+    rl_db = 20.0 * np.log10(refl / (refl.max() or 1.0) + 1e-9)
+    best = float(xs[int(np.argmin(refl))])
+    return {"t_ms": last["t_ms"], "iq": last["iq"], "f_khz": xs, "mag": rl_db,
+            "msgs": f"Wobble: dip at {best:.4f} MHz (depth {rl_db.min():.1f} dB); "
+                    f"tune toward Larmor {c:.4f} MHz, match to deepen.",
+            "sweep": {"xlabel": "Frequency (MHz)", "ylabel": "Return loss (dB)",
+                      "best": best, "title": f"Wobble — tune/match dip at {best:.4f} MHz"},
+            "flodict": None}
+
+
 def run_experiment(params, demo=False):
     """Run one acquisition. Returns dict with time/freq arrays + msgs.
 
@@ -310,6 +343,8 @@ def run_experiment(params, demo=False):
         return run_sweep(params, demo, seq.split(":", 1)[1])
     if seq.startswith("image:"):
         return run_image(params, demo)
+    if seq == "wobble":
+        return run_wobble(params, demo)
 
     # Signal averaging (NSA): repeat the scan and average for SNR (√N).
     nsa = int(params.get("nsa", 1))
@@ -585,6 +620,7 @@ def launch_gui(smoke=False):
             self.seq_combo.addItem("Noise scan (RX only)", "noise")
             self.seq_combo.addItem("Frequency sweep (find resonance)", "sweep:freq")
             self.seq_combo.addItem("RF amplitude calibration", "sweep:rfamp")
+            self.seq_combo.addItem("Wobble — tune & match (coil)", "wobble")
             self.seq_combo.addItem("2D Image + recon (phantom)", "image:phantom")
             # real mri4all/console sequences (reused via the bundled engine)
             try:
@@ -707,7 +743,7 @@ def launch_gui(smoke=False):
             return isinstance(seq, str) and seq.startswith("sweep:")
 
         def _no_diagram(self, seq):
-            return (self._is_console(seq) or self._is_sweep(seq)
+            return (self._is_console(seq) or self._is_sweep(seq) or seq == "wobble"
                     or (isinstance(seq, str) and seq.startswith("image:")))
 
         def _params(self):
@@ -806,12 +842,14 @@ def launch_gui(smoke=False):
             self.c_m.setData(res["t_ms"], np.abs(iq))
             self.c_s.setData(res["f_khz"], res["mag"])
             sw = res.get("sweep")
-            if sw:                            # calibration sweep: lower plot = sweep curve
-                self.p_spec.setTitle(f"Calibration sweep — peak at {sw['best']:.4g}")
+            if sw:                            # calibration sweep / wobble: lower plot = curve
+                self.p_spec.setTitle(sw.get("title", f"Calibration sweep — peak at {sw['best']:.4g}"))
                 self.p_spec.setLabel("bottom", sw["xlabel"])
+                self.p_spec.setLabel("left", sw.get("ylabel", ""))
             else:
                 self.p_spec.setTitle("Spectrum (FFT magnitude)")
                 self.p_spec.setLabel("bottom", "Frequency offset", "kHz")
+                self.p_spec.setLabel("left", "")
             img = res.get("image")
             if img is not None:               # reconstructed image → Image tab
                 self.img_view.setImage(np.asarray(img).T, autoLevels=True)
@@ -960,6 +998,9 @@ def selftest():
     dpath = _rec.export_dicom(imf["image"], {"sequence": "image:phantom"}, outdir=tempfile.mkdtemp())
     import pydicom
     assert pydicom.dcmread(dpath).Rows == 48, "DICOM export"
+    # wobble (tune & match) — synthetic return-loss dip at the center frequency
+    wob = run_experiment(dict(p, sequence="wobble", wobble_n=41), demo=True)
+    assert abs(wob["sweep"]["best"] - p["freq_mhz"]) < 0.02 and wob["mag"].min() < -10, "wobble dip"
     print(f"selftest OK: FID acq={meta['acq_len_us']:.0f}us samples={len(res['iq'])} "
           f"peak~{peak_khz:.2f}kHz; seq_wf={sorted(wf)}; "
           f"SE echo@{se_meta['echo_us']/1e3:.1f}ms 2 pulses, samples={len(se_res['iq'])}")
