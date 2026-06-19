@@ -272,6 +272,27 @@ def run_sweep(params, demo, kind):
             "sweep": {"xlabel": xlabel, "best": best}, "flodict": None}
 
 
+def run_image(params, demo=False):
+    """2D imaging + reconstruction. DEMO reconstructs a synthetic phantom to
+    prove the encode→recon pipeline (recon math reused from the console). Real
+    Cartesian imaging needs the gradient board to fill k-space.
+    """
+    import recon
+    name = params["sequence"].split(":", 1)[1]
+    n = int(params.get("img_n", 64))
+    if demo or name == "phantom":
+        k = recon.phantom_kspace(n, noise=float(params.get("img_noise", 0.01)))
+        img = recon.recon_2d(k)
+        msgs = f"DEMO: reconstructed {n}×{n} phantom (recon: {recon.RECON_SOURCE})."
+    else:
+        raise RuntimeError("Real 2D imaging needs the gradient board — no k-space "
+                           "without gradient encoding.")
+    kline = k[n // 2, :]                       # central k-space line for the 1-D panels
+    f_khz, mag = spectrum(kline, params["rx_dwell_us"])
+    return {"t_ms": np.arange(len(kline)), "iq": kline, "f_khz": f_khz, "mag": mag,
+            "msgs": msgs, "image": img, "kspace": k, "flodict": None}
+
+
 def run_experiment(params, demo=False):
     """Run one acquisition. Returns dict with time/freq arrays + msgs.
 
@@ -284,6 +305,8 @@ def run_experiment(params, demo=False):
         return run_console_sequence(params, demo)
     if seq.startswith("sweep:"):
         return run_sweep(params, demo, seq.split(":", 1)[1])
+    if seq.startswith("image:"):
+        return run_image(params, demo)
 
     flodict, meta = build_sequence(params)
 
@@ -364,6 +387,29 @@ def ensure_local_config(ip, port, fpga_clk_freq_MHz=122.88, grad_board="gpa-fhdo
     except OSError as e:
         raise RuntimeError(f"Could not write {path}: {e}")
     return path
+
+
+def save_result(res, params, outdir=None):
+    """Save the last acquisition to disk: raw data (+ image/k-space if present)
+    as .npy, plus a .json sidecar with the parameters. Returns the path stem.
+    (The console can additionally export DICOM via mri4all_console/recon/DICOM.)"""
+    import json
+    import datetime
+    outdir = outdir or os.path.join(HERE, "data")
+    os.makedirs(outdir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    seq = str(params.get("sequence", "scan")).replace(":", "_")
+    stem = os.path.join(outdir, f"{seq}_{stamp}")
+    np.save(stem + "_raw.npy", np.asarray(res["iq"]))
+    if res.get("image") is not None:
+        np.save(stem + "_image.npy", np.asarray(res["image"]))
+    if res.get("kspace") is not None:
+        np.save(stem + "_kspace.npy", np.asarray(res["kspace"]))
+    meta = {k: v for k, v in params.items() if isinstance(v, (int, float, str, bool))}
+    meta.update(message=res.get("msgs", ""), n_returned=int(len(res["iq"])))
+    with open(stem + ".json", "w") as f:
+        json.dump(meta, f, indent=2)
+    return stem
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +562,7 @@ def launch_gui(smoke=False):
             self.seq_combo.addItem("Noise scan (RX only)", "noise")
             self.seq_combo.addItem("Frequency sweep (find resonance)", "sweep:freq")
             self.seq_combo.addItem("RF amplitude calibration", "sweep:rfamp")
+            self.seq_combo.addItem("2D Image + recon (phantom)", "image:phantom")
             # real mri4all/console sequences (reused via the bundled engine)
             try:
                 import seq_engine
@@ -559,6 +606,9 @@ def launch_gui(smoke=False):
             self.preview_btn = QtWidgets.QPushButton("⊞  Preview Sequence")
             self.preview_btn.clicked.connect(self.on_preview)
             pl.addWidget(self.preview_btn)
+            self.save_btn = QtWidgets.QPushButton("💾  Save data")
+            self.save_btn.clicked.connect(self.on_save)
+            pl.addWidget(self.save_btn)
             back = QtWidgets.QPushButton("‹ Home"); back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
             pl.addWidget(back)
             pl.addStretch()
@@ -597,6 +647,12 @@ def launch_gui(smoke=False):
                     pw.setLabel("bottom", "Time (µs)")   # plain label, no SI auto-scaling
                 seqv.addWidget(pw)
             tabs.addTab(seqw, "Sequence")
+
+            # -- Image tab: reconstructed image viewer --
+            self.img_view = pg.ImageView()
+            self.img_view.ui.roiBtn.hide(); self.img_view.ui.menuBtn.hide()
+            tabs.addTab(self.img_view, "Image")
+
             self.tabs = tabs
             cl.addWidget(tabs, 1)
 
@@ -619,7 +675,8 @@ def launch_gui(smoke=False):
             return isinstance(seq, str) and seq.startswith("sweep:")
 
         def _no_diagram(self, seq):
-            return self._is_console(seq) or self._is_sweep(seq)
+            return (self._is_console(seq) or self._is_sweep(seq)
+                    or (isinstance(seq, str) and seq.startswith("image:")))
 
         def _params(self):
             seq = self.seq_combo.currentData()
@@ -704,6 +761,7 @@ def launch_gui(smoke=False):
 
         def on_done(self, res):
             self.run_btn.setEnabled(True)
+            self.last_res = res
             iq = res["iq"]
             self.c_i.setData(res["t_ms"], iq.real)
             self.c_q.setData(res["t_ms"], iq.imag)
@@ -716,9 +774,23 @@ def launch_gui(smoke=False):
             else:
                 self.p_spec.setTitle("Spectrum (FFT magnitude)")
                 self.p_spec.setLabel("bottom", "Frequency offset", "kHz")
-            if res.get("flodict"):            # console seq: draw its compiled diagram
+            img = res.get("image")
+            if img is not None:               # reconstructed image → Image tab
+                self.img_view.setImage(np.asarray(img).T, autoLevels=True)
+                self.tabs.setCurrentIndex(self.tabs.count() - 1)
+            elif res.get("flodict"):          # console seq: draw its compiled diagram
                 self._draw_flodict(res["flodict"])
             self.log(f"Received {len(iq)} samples.  {res['msgs']}")
+
+        def on_save(self):
+            if getattr(self, "last_res", None) is None:
+                self.log("Nothing to save yet — run a scan first.")
+                return
+            try:
+                stem = save_result(self.last_res, self._params())
+                self.log(f"Saved → {os.path.basename(stem)}.*  (in data/)")
+            except Exception as e:
+                self.log(f"Save failed: {type(e).__name__}: {e}")
 
         def on_failed(self, err):
             self.run_btn.setEnabled(True)
@@ -765,7 +837,11 @@ def launch_gui(smoke=False):
             win.on_done(run_experiment(dict(demo_params, sequence="loopback", rf_amp=0.3), demo=True))
             win.tabs.setCurrentIndex(0); app.processEvents(); app.processEvents()
             win.grab().save(f"{shot}_loopback.png")
-            print(f"screenshots saved: {shot}_home.png, {shot}_exam.png, {shot}_seq.png, {shot}_seq_se.png, {shot}_loopback.png")
+            # 2D image reconstruction (demo phantom) → Image tab
+            win.on_done(run_experiment(dict(demo_params, sequence="image:phantom", img_n=64), demo=True))
+            app.processEvents(); app.processEvents()
+            win.grab().save(f"{shot}_image.png")
+            print(f"screenshots saved: {shot}_home/exam/seq/seq_se/loopback/image.png")
         else:
             win.stack.setCurrentIndex(1); app.processEvents()
             print(f"smoketest OK: window built, {win.stack.count()} screens, "
@@ -816,6 +892,13 @@ def selftest():
     # RF amplitude calibration (demo) — returns a curve
     rs = run_experiment(dict(p, sequence="sweep:rfamp", sweep_n=11), demo=True)
     assert len(rs["mag"]) == 11 and "sweep" in rs
+    # 2D image reconstruction (demo phantom) — reuses the console recon math
+    im = run_experiment(dict(p, sequence="image:phantom", img_n=48), demo=True)
+    assert im["image"].shape == (48, 48) and im["kspace"].shape == (48, 48), "image dims"
+    # save round-trips to disk (.npy + .json)
+    import tempfile
+    stem = save_result(im, dict(p, sequence="image:phantom"), outdir=tempfile.mkdtemp())
+    assert os.path.exists(stem + "_image.npy") and os.path.exists(stem + ".json"), "save"
     print(f"selftest OK: FID acq={meta['acq_len_us']:.0f}us samples={len(res['iq'])} "
           f"peak~{peak_khz:.2f}kHz; seq_wf={sorted(wf)}; "
           f"SE echo@{se_meta['echo_us']/1e3:.1f}ms 2 pulses, samples={len(se_res['iq'])}")

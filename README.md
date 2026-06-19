@@ -38,6 +38,11 @@ device-tree overlay; `marcos_server` talks to the FPGA via `/dev/mem`).
   calibration** — run an FID across the parameter and plot peak vs. value.
 - **Console sequences**: the real `mri4all/console` pypulseq builders (`rf_se`,
   `se_1D`) run through flocra-pulseq → marcos, reused without a rewrite.
+- **2D image reconstruction**: k-space → image using the console's own recon math
+  (`recon.py` loads `mri4all_console/recon/recon_utils/imaging.py`); an **Image**
+  tab displays it. Demo reconstructs a synthetic phantom; real imaging needs the
+  gradient board.
+- **Save data**: writes raw / image / k-space (`.npy`) + a `.json` sidecar to `data/`.
 - Pulse-**sequence diagrams**, live **time-domain + FFT** plots, demo + real modes.
 - MRI4all dark/amber theme, Home → Examination flow.
 
