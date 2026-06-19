@@ -62,12 +62,14 @@ CIC_FASTEST_RATE, CIC_SLOWEST_RATE = 4, 4095 # CIC core settings
 
 def insta(instr, data):
     """ Instruction A: FSM control """
+    instr = int(instr); data = int(data)   # NumPy-2 safe (avoid uint overflow)
     assert instr in [INOP, IFINISH, IWAIT, ITRIG, ITRIGFOREVER], "Unknown instruction"
     assert (data & COUNTER_MAX) == (data & 0xffffffff), "Data out of range"
     return (instr << 24) | (data & 0xffffff)
 
 def instb(tgt, delay, data):
     """ Instruction B: timed buffered data """
+    tgt = int(tgt); delay = int(delay); data = int(data)   # NumPy-2 safe
     assert tgt <= 24, "Unknown target buffer"
     assert 0 <= delay <= 255, "Delay out of range"
     assert (data & 0xffff) == (data & 0xffffffff), "Data out of range"

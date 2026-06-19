@@ -282,19 +282,21 @@ def cl2bin(changelist, changelist_grad,
             if time != current_time:
                 close_timestep(current_time)
                 current_time = time
-            buf_diff = (current_bufs[buf] ^ val) & mask
-            assert buf_diff & change_masks[buf] == 0, "Tried to set a buffer to two values at once"
+            # NumPy-2 safe: do bit math in Python ints (no uint16 overflow on ~mask)
+            cb = int(current_bufs[buf]); v = int(val); m = int(mask)
+            buf_diff = (cb ^ v) & m
+            assert buf_diff & int(change_masks[buf]) == 0, "Tried to set a buffer to two values at once"
             if buf_diff == 0:
                 if buf not in (1, 2):
                     # gradient buffers will have unneeded instructions
                     # all the time, so not worth warning the user for
                     # those
-                    removed_instruction_warnings.append( "Instruction at tick {:d}, buffer {:d}, value 0x{:04x}, mask 0x{:04x} will have no effect. Skipping...".format(time, buf, val, mask) )
+                    removed_instruction_warnings.append( "Instruction at tick {:d}, buffer {:d}, value 0x{:04x}, mask 0x{:04x} will have no effect. Skipping...".format(time, buf, v, m) )
                 continue
-            val_masked = val & mask
-            old_val_unmasked = current_bufs[buf] & ~mask
-            new_val = old_val_unmasked | val_masked
-            change_masks[buf] |= mask
+            val_masked = v & m
+            old_val_unmasked = cb & (~m & 0xFFFF)
+            new_val = (old_val_unmasked | val_masked) & 0xFFFF
+            change_masks[buf] = (int(change_masks[buf]) | m) & 0xFFFF
             current_bufs[buf] = new_val
             changed[buf] = True
 

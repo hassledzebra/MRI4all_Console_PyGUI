@@ -160,3 +160,7 @@ cython_debug/
 #.idea/
 
 *.swp
+redpitaya_console/.venv/
+redpitaya_console/engine/
+__pycache__/
+*.pyc
