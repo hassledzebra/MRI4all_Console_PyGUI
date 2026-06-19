@@ -273,20 +273,23 @@ def run_sweep(params, demo, kind):
 
 
 def run_image(params, demo=False):
-    """2D imaging + reconstruction. DEMO reconstructs a synthetic phantom to
-    prove the encode→recon pipeline (recon math reused from the console). Real
-    Cartesian imaging needs the gradient board to fill k-space.
+    """2D imaging + reconstruction (recon/filter/denoise reused from the console).
+    DEMO reconstructs a synthetic phantom; real Cartesian imaging needs the
+    gradient board to fill k-space.
     """
-    import recon
+    import reconstruct as rec
     name = params["sequence"].split(":", 1)[1]
     n = int(params.get("img_n", 64))
     if demo or name == "phantom":
-        k = recon.phantom_kspace(n, noise=float(params.get("img_noise", 0.01)))
-        img = recon.recon_2d(k)
-        msgs = f"DEMO: reconstructed {n}×{n} phantom (recon: {recon.RECON_SOURCE})."
+        k = rec.phantom_kspace(n, noise=float(params.get("img_noise", 0.02)))
     else:
         raise RuntimeError("Real 2D imaging needs the gradient board — no k-space "
                            "without gradient encoding.")
+    k = rec.kspace_filter(k, params.get("img_filter", "none"))     # console kFilter
+    img = rec.recon_2d(k)
+    img = rec.denoise_image(img, params.get("img_denoise", 0.0))   # console denoise
+    msgs = (f"DEMO: {n}×{n} phantom — filter={params.get('img_filter', 'none')}, "
+            f"denoise σ={params.get('img_denoise', 0)} (recon: {rec.RECON_SOURCE}).")
     kline = k[n // 2, :]                       # central k-space line for the 1-D panels
     f_khz, mag = spectrum(kline, params["rx_dwell_us"])
     return {"t_ms": np.arange(len(kline)), "iq": kline, "f_khz": f_khz, "mag": mag,
@@ -308,17 +311,31 @@ def run_experiment(params, demo=False):
     if seq.startswith("image:"):
         return run_image(params, demo)
 
+    # Signal averaging (NSA): repeat the scan and average for SNR (√N).
+    nsa = int(params.get("nsa", 1))
+    if nsa > 1:
+        accum = None
+        for j in range(nsa):
+            r = run_experiment(dict(params, nsa=1, _seed=j), demo=demo)
+            accum = r["iq"].astype(complex) if accum is None else accum + r["iq"]
+        data = accum / nsa
+        t_ms = np.arange(len(data)) * params["rx_dwell_us"] * 1e-3
+        f_khz, mag = spectrum(data, params["rx_dwell_us"])
+        return {"t_ms": t_ms, "iq": data, "f_khz": f_khz, "mag": mag,
+                "msgs": f"NSA={nsa} averaged.", "meta": {}}
+
     flodict, meta = build_sequence(params)
 
     if demo:
+        sd = int(params.get("_seed", 0))
         if seq == "noise":
-            data = synth_fid(params["n_samples"], params["rx_dwell_us"], amp=0.0)
+            data = synth_fid(params["n_samples"], params["rx_dwell_us"], amp=0.0, seed=sd)
             msgs = "DEMO MODE: synthetic noise scan (no hardware contacted)."
         elif seq == "loopback":
-            data = synth_loopback(params["n_samples"], amp=0.6 * params["rf_amp"])
+            data = synth_loopback(params["n_samples"], amp=0.6 * params["rf_amp"], seed=sd)
             msgs = "DEMO MODE: synthetic TX→RX loopback (no hardware contacted)."
         else:
-            data = synth_fid(params["n_samples"], params["rx_dwell_us"])
+            data = synth_fid(params["n_samples"], params["rx_dwell_us"], seed=sd)
             msgs = "DEMO MODE: synthetic FID (no hardware contacted)."
     else:
         import socket as _socket
@@ -555,6 +572,12 @@ def launch_gui(smoke=False):
             self.nsamp = QtWidgets.QSpinBox(); self.nsamp.setRange(8, 100000); self.nsamp.setValue(512)
             self.dead = QtWidgets.QDoubleSpinBox(); self.dead.setRange(0, 1000); self.dead.setValue(30.0); self.dead.setSuffix(" µs")
             self.te = QtWidgets.QDoubleSpinBox(); self.te.setRange(0.1, 1000); self.te.setDecimals(2); self.te.setValue(10.0); self.te.setSuffix(" ms")
+            self.nsa = QtWidgets.QSpinBox(); self.nsa.setRange(1, 256); self.nsa.setValue(1)
+            self.img_filter = QtWidgets.QComboBox()
+            for _t, _d in [("None", "none"), ("Fermi", "fermi"), ("Gaussian", "gaussian")]:
+                self.img_filter.addItem(_t, _d)
+            self.img_denoise = QtWidgets.QDoubleSpinBox(); self.img_denoise.setRange(0, 5)
+            self.img_denoise.setSingleStep(0.2); self.img_denoise.setValue(0.0); self.img_denoise.setSuffix(" σ")
             self.seq_combo = QtWidgets.QComboBox()
             self.seq_combo.addItem("FID (pulse-acquire)", "fid")
             self.seq_combo.addItem("Spin Echo (90°–180°)", "se")
@@ -587,6 +610,11 @@ def launch_gui(smoke=False):
                 form2.addRow(label, w)
             form2.addRow(self.dead_label, self.dead)
             form2.addRow(self.te_label, self.te)
+            form2.addRow("Averages (NSA)", self.nsa)
+            self.imgfilter_label = QtWidgets.QLabel("k-space filter")
+            self.imgdenoise_label = QtWidgets.QLabel("Denoise")
+            form2.addRow(self.imgfilter_label, self.img_filter)
+            form2.addRow(self.imgdenoise_label, self.img_denoise)
             pl.addLayout(form2)
             # dynamic parameter form for console sequences (TE/TR/NSA/…)
             self.console_box = QtWidgets.QWidget()
@@ -606,9 +634,13 @@ def launch_gui(smoke=False):
             self.preview_btn = QtWidgets.QPushButton("⊞  Preview Sequence")
             self.preview_btn.clicked.connect(self.on_preview)
             pl.addWidget(self.preview_btn)
-            self.save_btn = QtWidgets.QPushButton("💾  Save data")
+            saverow = QtWidgets.QHBoxLayout()
+            self.save_btn = QtWidgets.QPushButton("💾  Save")
             self.save_btn.clicked.connect(self.on_save)
-            pl.addWidget(self.save_btn)
+            self.dicom_btn = QtWidgets.QPushButton("⬇  DICOM")
+            self.dicom_btn.clicked.connect(self.on_export_dicom)
+            saverow.addWidget(self.save_btn); saverow.addWidget(self.dicom_btn)
+            pl.addLayout(saverow)
             back = QtWidgets.QPushButton("‹ Home"); back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
             pl.addWidget(back)
             pl.addStretch()
@@ -684,9 +716,12 @@ def launch_gui(smoke=False):
                      freq_mhz=self.freq.value(), rf_len_us=self.rf_len.value(),
                      rf_amp=self.rf_amp.value(), rx_dwell_us=self.dwell.value(),
                      n_samples=self.nsamp.value(), deadtime_us=self.dead.value(),
-                     sequence=seq, te_ms=self.te.value())
+                     sequence=seq, te_ms=self.te.value(), nsa=self.nsa.value())
             if self._is_console(seq):
                 p["console_params"] = {k: g() for k, g in self.console_widgets.items()}
+            if isinstance(seq, str) and seq.startswith("image:"):
+                p["img_filter"] = self.img_filter.currentData()
+                p["img_denoise"] = self.img_denoise.value()
             return p
 
         def _populate_console_form(self, name):
@@ -712,6 +747,9 @@ def launch_gui(smoke=False):
             is_con = self._is_console(seq)
             self.te_label.setVisible(seq == "se"); self.te.setVisible(seq == "se")
             self.dead_label.setVisible(seq == "fid"); self.dead.setVisible(seq == "fid")
+            is_img = isinstance(seq, str) and seq.startswith("image:")
+            self.imgfilter_label.setVisible(is_img); self.img_filter.setVisible(is_img)
+            self.imgdenoise_label.setVisible(is_img); self.img_denoise.setVisible(is_img)
             # built-in pulse params don't apply to console sequences (they bring their own)
             for w in (self.rf_len, self.rf_amp, self.dwell, self.nsamp):
                 w.setEnabled(not is_con)
@@ -791,6 +829,18 @@ def launch_gui(smoke=False):
                 self.log(f"Saved → {os.path.basename(stem)}.*  (in data/)")
             except Exception as e:
                 self.log(f"Save failed: {type(e).__name__}: {e}")
+
+        def on_export_dicom(self):
+            res = getattr(self, "last_res", None)
+            if res is None or res.get("image") is None:
+                self.log("Export DICOM: run an image sequence first (need a 2-D image).")
+                return
+            try:
+                import reconstruct as rec
+                path = rec.export_dicom(res["image"], self._params())
+                self.log(f"DICOM → {os.path.basename(path)}  (in data/)")
+            except Exception as e:
+                self.log(f"DICOM export failed: {type(e).__name__}: {e}")
 
         def on_failed(self, err):
             self.run_btn.setEnabled(True)
@@ -899,6 +949,17 @@ def selftest():
     import tempfile
     stem = save_result(im, dict(p, sequence="image:phantom"), outdir=tempfile.mkdtemp())
     assert os.path.exists(stem + "_image.npy") and os.path.exists(stem + ".json"), "save"
+    # NSA averaging reduces noise (√N)
+    n1 = run_experiment(dict(p, sequence="noise"), demo=True)["iq"]
+    n8 = run_experiment(dict(p, sequence="noise", nsa=8), demo=True)["iq"]
+    assert np.abs(n8).std() < 0.8 * np.abs(n1).std(), "NSA should reduce noise"
+    # image with console k-space filter + denoise, then DICOM export
+    imf = run_experiment(dict(p, sequence="image:phantom", img_n=48,
+                              img_filter="fermi", img_denoise=0.5), demo=True)
+    import reconstruct as _rec
+    dpath = _rec.export_dicom(imf["image"], {"sequence": "image:phantom"}, outdir=tempfile.mkdtemp())
+    import pydicom
+    assert pydicom.dcmread(dpath).Rows == 48, "DICOM export"
     print(f"selftest OK: FID acq={meta['acq_len_us']:.0f}us samples={len(res['iq'])} "
           f"peak~{peak_khz:.2f}kHz; seq_wf={sorted(wf)}; "
           f"SE echo@{se_meta['echo_us']/1e3:.1f}ms 2 pulses, samples={len(se_res['iq'])}")

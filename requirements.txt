@@ -1,4 +1,15 @@
+# Core GUI + built-in sequences
 PySide6>=6.6
 pyqtgraph>=0.13
 numpy>=1.26
 msgpack>=1.0
+
+# marcos client / console sequence builders (pypulseq, flocra-pulseq)
+scipy>=1.11
+matplotlib>=3.7
+pydantic>=2.2
+
+# reconstruction, denoising, DICOM export (reused from mri4all_console/recon)
+scikit-image>=0.22
+pydicom>=2.4
+nibabel>=5.0
