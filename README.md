@@ -1,5 +1,11 @@
 # Red Pitaya MaRCoS Console (Python GUI)
 
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![GUI](https://img.shields.io/badge/GUI-PySide6%20%2B%20pyqtgraph-green)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Built on](https://img.shields.io/badge/built%20on-MaRCoS%20%C2%B7%20MRI4all-orange)
+
 A native **macOS** Python GUI for operating a **Red Pitaya SDRlab 122-16** running
 [MaRCoS](https://github.com/vnegnev/marcos_extras) as a low-field MRI console —
 styled after the [MRI4all](https://github.com/mri4all/console) console, which
@@ -26,7 +32,10 @@ device-tree overlay; `marcos_server` talks to the FPGA via `/dev/mem`).
 
 ## What the GUI does
 
-- **Built-in sequences** (self-contained): FID, Spin Echo, **TX→RX loopback test**.
+- **Built-in sequences** (self-contained): FID, Spin Echo, **TX→RX loopback test**,
+  **noise scan**.
+- **Calibrations**: **frequency sweep** (find resonance) and **RF amplitude
+  calibration** — run an FID across the parameter and plot peak vs. value.
 - **Console sequences**: the real `mri4all/console` pypulseq builders (`rf_se`,
   `se_1D`) run through flocra-pulseq → marcos, reused without a rewrite.
 - Pulse-**sequence diagrams**, live **time-domain + FFT** plots, demo + real modes.

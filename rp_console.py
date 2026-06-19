@@ -128,10 +128,23 @@ def build_loopback_flodict(rf_len_us, rf_amp, rx_dwell_us, n_samples,
     return flodict, meta
 
 
+def build_noise_flodict(rx_dwell_us, n_samples, rx_start_us=10.0):
+    """Noise scan: RX window only, no transmit. Used to measure the receiver
+    noise floor / spot interference (coil tuning, grounding diagnostics)."""
+    acq_len_us = n_samples * rx_dwell_us
+    flodict = {"rx0_en": (np.array([rx_start_us, rx_start_us + acq_len_us]),
+                          np.array([1, 0]))}
+    meta = {"rx_start_us": rx_start_us, "rx_end_us": rx_start_us + acq_len_us,
+            "acq_len_us": acq_len_us}
+    return flodict, meta
+
+
 def build_sequence(params):
     """Dispatch to the selected sequence builder. params['sequence'] in
-    {'fid','se','loopback'}. Returns (flodict, meta)."""
+    {'fid','se','loopback','noise'}. Returns (flodict, meta)."""
     seq = params.get("sequence")
+    if seq == "noise":
+        return build_noise_flodict(params["rx_dwell_us"], params["n_samples"])
     if seq == "se":
         return build_se_flodict(params["rf_len_us"], params["rf_amp"],
                                 params["rx_dwell_us"], params["n_samples"],
@@ -225,6 +238,40 @@ def run_console_sequence(params, demo=False):
             "flodict": flo, "meta": {}}
 
 
+def run_sweep(params, demo, kind):
+    """Calibration sweep. kind='freq' (find resonance, 'adj_frequency') or
+    'rfamp' (RF amplitude calibration). Runs an FID at each step and reports the
+    peak signal vs the swept parameter. Returns the usual result dict plus a
+    'sweep' key so the GUI relabels the lower plot as the sweep curve.
+    """
+    n = int(params.get("sweep_n", 21 if kind == "freq" else 11))
+    if kind == "freq":
+        c = params["freq_mhz"]; span = params.get("sweep_span_khz", 100.0) / 1e3
+        xs = np.linspace(c - span / 2, c + span / 2, n); xlabel = "Center freq (MHz)"; key = "freq_mhz"
+    else:
+        amax = params.get("sweep_amp_max", max(params["rf_amp"], 0.5)) or 1.0
+        xs = np.linspace(0.0, amax, n); xlabel = "RF amplitude"; key = "rf_amp"
+    base = dict(params); base["sequence"] = "fid"
+    peaks = np.zeros(n); last = None
+    for i, x in enumerate(xs):
+        if demo:
+            if kind == "freq":
+                a = np.exp(-((x - params["freq_mhz"]) ** 2) / (2 * (span / 6) ** 2))
+            else:
+                a = abs(np.sin(np.pi * x / amax))            # flip-angle response
+            iq = a * 1e-2 * np.exp(1j * 0.3) * np.ones(params["n_samples"]) \
+                + synth_fid(params["n_samples"], params["rx_dwell_us"], amp=0.0)
+            last = {"iq": iq, "t_ms": np.arange(len(iq)) * params["rx_dwell_us"] * 1e-3}
+        else:
+            sp = dict(base); sp[key] = float(x)
+            last = run_experiment(sp, demo=False)
+        peaks[i] = float(np.abs(last["iq"]).mean())
+    best = float(xs[int(np.argmax(peaks))])
+    return {"t_ms": last["t_ms"], "iq": last["iq"], "f_khz": xs, "mag": peaks,
+            "msgs": f"{xlabel} sweep ({n} pts): peak at {best:.4g}",
+            "sweep": {"xlabel": xlabel, "best": best}, "flodict": None}
+
+
 def run_experiment(params, demo=False):
     """Run one acquisition. Returns dict with time/freq arrays + msgs.
 
@@ -232,13 +279,19 @@ def run_experiment(params, demo=False):
             n_samples, deadtime_us, ip, port, sequence.
     demo:   if True, synthesize data instead of touching hardware.
     """
-    if str(params.get("sequence", "")).startswith("console:"):
+    seq = str(params.get("sequence", ""))
+    if seq.startswith("console:"):
         return run_console_sequence(params, demo)
+    if seq.startswith("sweep:"):
+        return run_sweep(params, demo, seq.split(":", 1)[1])
 
     flodict, meta = build_sequence(params)
 
     if demo:
-        if params.get("sequence") == "loopback":
+        if seq == "noise":
+            data = synth_fid(params["n_samples"], params["rx_dwell_us"], amp=0.0)
+            msgs = "DEMO MODE: synthetic noise scan (no hardware contacted)."
+        elif seq == "loopback":
             data = synth_loopback(params["n_samples"], amp=0.6 * params["rf_amp"])
             msgs = "DEMO MODE: synthetic TX→RX loopback (no hardware contacted)."
         else:
@@ -460,6 +513,9 @@ def launch_gui(smoke=False):
             self.seq_combo.addItem("FID (pulse-acquire)", "fid")
             self.seq_combo.addItem("Spin Echo (90°–180°)", "se")
             self.seq_combo.addItem("Loopback test (TX→RX)", "loopback")
+            self.seq_combo.addItem("Noise scan (RX only)", "noise")
+            self.seq_combo.addItem("Frequency sweep (find resonance)", "sweep:freq")
+            self.seq_combo.addItem("RF amplitude calibration", "sweep:rfamp")
             # real mri4all/console sequences (reused via the bundled engine)
             try:
                 import seq_engine
@@ -558,6 +614,13 @@ def launch_gui(smoke=False):
         def _is_console(seq):
             return isinstance(seq, str) and seq.startswith("console:")
 
+        @staticmethod
+        def _is_sweep(seq):
+            return isinstance(seq, str) and seq.startswith("sweep:")
+
+        def _no_diagram(self, seq):
+            return self._is_console(seq) or self._is_sweep(seq)
+
         def _params(self):
             seq = self.seq_combo.currentData()
             p = dict(ip=self.ip.text().strip(), port=self.port.value(),
@@ -598,7 +661,7 @@ def launch_gui(smoke=False):
             self.console_box.setVisible(is_con)
             if is_con:
                 self._populate_console_form(seq.split(":", 1)[1])
-            elif hasattr(self, "seq_rows"):
+            elif hasattr(self, "seq_rows") and not self._is_sweep(seq):
                 self._draw_sequence(self._params())
 
         def _draw_flodict(self, flodict, t_end=None):
@@ -614,9 +677,9 @@ def launch_gui(smoke=False):
             self._draw_flodict(flodict, t_end=meta["rx_end_us"] * 1.05)
 
         def on_preview(self):
-            if self._is_console(self.seq_combo.currentData()):
-                self.log("Console sequence: press Run Scan — its diagram is drawn "
-                         "from the compiled waveforms after the scan.")
+            seq = self.seq_combo.currentData()
+            if self._no_diagram(seq):
+                self.log("This routine has no single pulse diagram — press Run Scan.")
                 return
             self._draw_sequence(self._params())
             self.tabs.setCurrentIndex(1)   # show Sequence tab
@@ -627,7 +690,7 @@ def launch_gui(smoke=False):
                 self.log("A scan is already running — please wait.")
                 return
             params = self._params()
-            if not self._is_console(params.get("sequence", "")):
+            if not self._no_diagram(params.get("sequence", "")):
                 self._draw_sequence(params)
             demo = self.demo.isChecked()
             self.run_btn.setEnabled(False)
@@ -646,7 +709,14 @@ def launch_gui(smoke=False):
             self.c_q.setData(res["t_ms"], iq.imag)
             self.c_m.setData(res["t_ms"], np.abs(iq))
             self.c_s.setData(res["f_khz"], res["mag"])
-            if res.get("flodict"):           # console seq: draw its compiled diagram
+            sw = res.get("sweep")
+            if sw:                            # calibration sweep: lower plot = sweep curve
+                self.p_spec.setTitle(f"Calibration sweep — peak at {sw['best']:.4g}")
+                self.p_spec.setLabel("bottom", sw["xlabel"])
+            else:
+                self.p_spec.setTitle("Spectrum (FFT magnitude)")
+                self.p_spec.setLabel("bottom", "Frequency offset", "kHz")
+            if res.get("flodict"):            # console seq: draw its compiled diagram
                 self._draw_flodict(res["flodict"])
             self.log(f"Received {len(iq)} samples.  {res['msgs']}")
 
@@ -736,6 +806,16 @@ def selftest():
     lb_res = run_experiment(lb_p, demo=True)
     mid = np.abs(lb_res["iq"][256]); edge = np.abs(lb_res["iq"][5])
     assert mid > 10 * edge, "loopback center should be >> edges"
+    # noise scan (RX only)
+    nz_fd, _ = build_noise_flodict(p["rx_dwell_us"], p["n_samples"])
+    assert set(nz_fd) == {"rx0_en"}, "noise scan should have RX only"
+    assert len(run_experiment(dict(p, sequence="noise"), demo=True)["iq"]) == 512
+    # frequency sweep (demo) — synthetic resonance peaks at the center freq
+    fs = run_experiment(dict(p, sequence="sweep:freq", sweep_n=21, sweep_span_khz=100), demo=True)
+    assert "sweep" in fs and abs(fs["sweep"]["best"] - p["freq_mhz"]) < 0.03, fs["sweep"]
+    # RF amplitude calibration (demo) — returns a curve
+    rs = run_experiment(dict(p, sequence="sweep:rfamp", sweep_n=11), demo=True)
+    assert len(rs["mag"]) == 11 and "sweep" in rs
     print(f"selftest OK: FID acq={meta['acq_len_us']:.0f}us samples={len(res['iq'])} "
           f"peak~{peak_khz:.2f}kHz; seq_wf={sorted(wf)}; "
           f"SE echo@{se_meta['echo_us']/1e3:.1f}ms 2 pulses, samples={len(se_res['iq'])}")
